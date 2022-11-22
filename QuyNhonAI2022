@@ -1,0 +1,159 @@
+import cv2
+import easyocr
+import os
+import pandas as pd
+import numpy as np
+import statistics
+from googletrans import Translator
+import imutils
+
+reader = easyocr.Reader(['vi', 'en'])
+
+
+def remove_BZ(group_label):
+    if group_label == []:
+        pass
+    else:
+        list_med = []
+        list_group_label = []
+        for each_label in group_label:
+            list_each_label = list(each_label)
+            height1 = each_label[0][3][1] - each_label[0][0][1]
+            list_each_label.append(height1)
+            list_med.append(height1)
+            list_group_label.append(list_each_label)
+        med = statistics.median(list_med)
+        for each_label1 in list_group_label:
+            if each_label1[3] > (med * 3):
+                each_label1[1] = 'dr9.9op'
+    return list_group_label
+
+
+list_regex = ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9', ',', '.', 'đ', 'k', 'Đ', 'K']
+
+
+def convert_price(gia1):
+    if 'k' in gia1.lower():
+        gia1 = gia1.replace('k', '.000')
+    elif 'đ' in gia1.lower():
+        gia1 = gia1.replace('đ', '')
+    elif len(gia1) == 2:
+        gia1 = gia1 + '000'
+    else:
+        gia1 = gia1
+    return gia1
+
+
+def detect_price(price):
+    for char1 in price:
+        if char1 not in list_regex:
+            break
+        else:
+            price = convert_price(price)
+    return price
+
+
+def read_folder(f_path):
+    ds_anh = []
+    for file in os.listdir(f_path):
+        if file.endswith(".jpeg") | file.endswith(".jpg"):
+            ds_anh.append(file)
+    return ds_anh
+
+
+def read_img(image):
+    img_p = cv2.imread(image, cv2.COLOR_BGR2GRAY)
+    img_p = img_p.astype('uint8')
+    img_p = imutils.resize(img_p, width=1600)
+    return img_p
+
+
+def thresh_img(image_b_th, layer):
+    if layer == 1:
+        (thresh, img_thr1) = cv2.threshold(image_b_th, 180, 255, cv2.THRESH_BINARY_INV)  # Keep white text
+    else:
+        (thresh, img_thr1) = cv2.threshold(image_b_th, 150, 255, cv2.THRESH_BINARY)  # Keep black text
+    return img_thr1
+
+
+def get_label(list_image, table):
+    # Keep white text
+    for Anh in list_image:
+        img_raw = read_img(Anh)
+        # first thresh
+        (thresh, img_thr_c) = cv2.threshold(img_raw, 180, 255, cv2.THRESH_BINARY)
+        img_gray = cv2.cvtColor(img_thr_c, cv2.COLOR_BGR2GRAY)
+        kernel = np.ones((1, 1), np.uint8)
+        img_a_th = cv2.dilate(img_gray, kernel, iterations=1)
+        img_a_th = cv2.erode(img_a_th, kernel, iterations=1)
+        # 2nd thresh
+        img_a_thr1 = thresh_img(img_a_th, 1)
+        ketqua = reader.readtext(img_a_thr1, rotation_info=[10, 15, 20, 25, 35, 45], decoder='beamsearch', beamWidth=5,
+                                 batch_size=8, contrast_ths=0.1,
+                                 text_threshold=0.40, low_text=0.40, add_margin=0.12, width_ths=1.0, height_ths=1.0,
+                                 adjust_contrast=0.5, slope_ths=0.3)
+        ketqua1 = remove_BZ(ketqua)
+        lenth1 = len(ketqua1)
+
+        if lenth1 < 10:
+            img_a_thr2 = thresh_img(img_a_th, 2)
+            ketqua2 = reader.readtext(img_a_thr2, rotation_info=[10, 15, 20, 25, 35, 45], decoder='beamsearch',
+                                      beamWidth=5, batch_size=8, contrast_ths=0.1,
+                                      text_threshold=0.40, low_text=0.40, add_margin=0.12, width_ths=1.0,
+                                      height_ths=1.0, adjust_contrast=0.5, slope_ths=0.3)
+            ketqua3 = remove_BZ(ketqua2)
+            if lenth1 < len(ketqua3):
+                ketqua_c = ketqua3
+            else:
+                ketqua_c = ketqua1
+        else:
+            ketqua_c = ketqua1
+        list_tg = ['', '']
+        table2 = pd.DataFrame(columns=['Image', 'Label', 'Box', 'Height', 'Price'])
+        for each_label in ketqua_c:
+            name1 = detect_price(each_label[1])
+            if (list_tg[0] == '') & (name1[-3:] != '000'):
+                list_tg[0] = name1
+            elif (list_tg[0] != '') & (name1[-3:] == '000'):
+                price = name1
+                box = each_label[0]
+                height = each_label[3]
+                label = list_tg[0]
+                table2 = table2.append({'Image': Anh, 'Label': label, 'Box': box, ' Height': height, 'Price': price},
+                                       ignore_index=True)
+                list_tg = ['', '']
+            elif (list_tg[0] != '') & (name1[-3:] != '000'):
+                price = 'NOT GIVEN'
+                box = each_label[0]
+                height = each_label[3]
+                label = list_tg[0]
+                table2 = table2.append(
+                    {'ImageName': Anh, 'VietnameseName': label, 'Box': box, ' Height': height, 'Price': price,
+                     }, ignore_index=True)
+                list_tg = ['', '']
+            else:
+                continue
+        table = table.append(table2, ignore_index=True)
+
+    return table
+
+
+def Trans(text):
+    translator = Translator()
+    dt = translator.detect(text)
+    if dt.lang == 'vi' and dt.confidence == 1.0:
+        result1 = translator.translate(text, src='vi', dest='en')
+        result = result1.text
+    else:
+        result = text
+    return result
+
+Path = ...
+lisst = read_folder(Path)
+Data = pd.DataFrame(columns=['ImageName', 'VietnameseName', 'Box', 'Height', 'Price'])
+Data_Out = get_label(lisst, Data)
+Data_Out = Data_Out.loc[Data_Out['Label'] != 'dr9.9op']
+Data_Out = Data_Out.loc[Data_Out['Label'].str.len() > 1]
+Data_Out['EnglishName'] = Data_Out['Label'].apply(Trans)
+Data_Output = Data_Out[['ImageName', 'VietnameseName', 'EnglishName', 'Price']]
+print(Data_Output)
